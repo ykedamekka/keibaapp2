@@ -1,8 +1,10 @@
+
 "use strict";
 
 // ========================================
 // 競馬メモアプリ
 // 既存データを引き継ぐバージョン
+// 複数メモの選択・一括コピー機能を追加
 // ========================================
 
 const STORAGE_KEY = "keiba-memo-app-memos";
@@ -48,6 +50,15 @@ const newGenreName = $("new-genre-name");
 const genreList = $("genre-list");
 
 let editingMemoId = null;
+
+// 複数選択中のメモID
+let selectedMemoIds = new Set();
+
+// 現在、検索・絞り込みで表示されているメモID
+let currentlyDisplayedMemoIds = [];
+
+// 一括操作用のツールバー
+let bulkToolbar = null;
 
 // ----------------------------------------
 // 保存データの読み込み
@@ -162,6 +173,274 @@ function formatDate(value) {
     hour: "2-digit",
     minute: "2-digit"
   });
+}
+
+// ----------------------------------------
+// 複数メモ選択ツールバー
+// ----------------------------------------
+
+function ensureBulkCopyToolbar() {
+  if (!memoList || !memoList.parentNode) return null;
+
+  if (bulkToolbar && bulkToolbar.isConnected) {
+    return bulkToolbar;
+  }
+
+  bulkToolbar = document.createElement("div");
+  bulkToolbar.id = "memo-bulk-toolbar";
+  bulkToolbar.className = "memo-bulk-toolbar";
+
+  bulkToolbar.style.display = "flex";
+  bulkToolbar.style.flexWrap = "wrap";
+  bulkToolbar.style.alignItems = "center";
+  bulkToolbar.style.gap = "8px";
+  bulkToolbar.style.padding = "12px";
+  bulkToolbar.style.margin = "12px 0";
+  bulkToolbar.style.border = "1px solid #d1d5db";
+  bulkToolbar.style.borderRadius = "10px";
+  bulkToolbar.style.background = "#f9fafb";
+
+  const heading = makeElement(
+    "strong",
+    "メモの一括操作",
+    "memo-bulk-heading"
+  );
+
+  heading.style.width = "100%";
+  bulkToolbar.appendChild(heading);
+
+  const selectAllButton = makeElement(
+    "button",
+    "表示中をすべて選択",
+    "memo-bulk-select-all-button"
+  );
+
+  selectAllButton.type = "button";
+
+  selectAllButton.addEventListener("click", () => {
+    currentlyDisplayedMemoIds.forEach((id) => {
+      selectedMemoIds.add(id);
+    });
+
+    renderMemos();
+  });
+
+  bulkToolbar.appendChild(selectAllButton);
+
+  const clearButton = makeElement(
+    "button",
+    "選択を解除",
+    "memo-bulk-clear-button"
+  );
+
+  clearButton.type = "button";
+
+  clearButton.addEventListener("click", () => {
+    selectedMemoIds.clear();
+    renderMemos();
+  });
+
+  bulkToolbar.appendChild(clearButton);
+
+  const copyButton = makeElement(
+    "button",
+    "選択したメモをまとめてコピー",
+    "memo-bulk-copy-button"
+  );
+
+  copyButton.type = "button";
+  copyButton.style.fontWeight = "bold";
+
+  copyButton.addEventListener("click", copySelectedMemosToNotion);
+
+  bulkToolbar.appendChild(copyButton);
+
+  const countLabel = makeElement(
+    "span",
+    "選択中：0件",
+    "memo-bulk-count"
+  );
+
+  countLabel.id = "memo-bulk-count";
+  countLabel.setAttribute("aria-live", "polite");
+  bulkToolbar.appendChild(countLabel);
+
+  memoList.parentNode.insertBefore(bulkToolbar, memoList);
+
+  return bulkToolbar;
+}
+
+function updateBulkToolbar() {
+  const toolbar = ensureBulkCopyToolbar();
+
+  if (!toolbar) return;
+
+  const countLabel = $("memo-bulk-count");
+  const copyButton = toolbar.querySelector(".memo-bulk-copy-button");
+
+  // すでに削除されたメモを選択状態から除外
+  const existingIds = new Set(memos.map((memo) => memo.id));
+
+  selectedMemoIds = new Set(
+    [...selectedMemoIds].filter((id) => existingIds.has(id))
+  );
+
+  if (countLabel) {
+    countLabel.textContent = `選択中：${selectedMemoIds.size}件`;
+  }
+
+  if (copyButton) {
+    copyButton.disabled = selectedMemoIds.size === 0;
+  }
+}
+
+function createMemoSelectionControl(memo) {
+  const row = document.createElement("div");
+  row.className = "memo-selection-row";
+  row.style.display = "flex";
+  row.style.alignItems = "center";
+  row.style.gap = "8px";
+  row.style.marginBottom = "10px";
+
+  const checkbox = document.createElement("input");
+  checkbox.type = "checkbox";
+  checkbox.className = "memo-select-checkbox";
+  checkbox.checked = selectedMemoIds.has(memo.id);
+  checkbox.setAttribute(
+    "aria-label",
+    `「${memo.title}」を選択`
+  );
+
+  checkbox.addEventListener("change", () => {
+    if (checkbox.checked) {
+      selectedMemoIds.add(memo.id);
+    } else {
+      selectedMemoIds.delete(memo.id);
+    }
+
+    updateBulkToolbar();
+  });
+
+  const label = makeElement(
+    "label",
+    "このメモを一括コピーの対象にする",
+    "memo-selection-label"
+  );
+
+  label.style.cursor = "pointer";
+  label.addEventListener("click", (event) => {
+    // チェックボックス本体の操作と重複しないようにする
+    if (event.target === checkbox) return;
+
+    checkbox.checked = !checkbox.checked;
+    checkbox.dispatchEvent(new Event("change"));
+  });
+
+  row.appendChild(checkbox);
+  row.appendChild(label);
+
+  return row;
+}
+
+// ----------------------------------------
+// Notion一括転記用の文章を作成
+// ----------------------------------------
+
+function buildBulkNotionText(selectedMemos) {
+  return selectedMemos.map((memo, index) => {
+    const source = memo.source || {};
+
+    const lines = [
+      `【メモ ${index + 1}】`,
+      `タイトル：${memo.title || "無題のメモ"}`,
+      `ジャンル：${memo.category || "未分類"}`,
+      `記録日：${formatDate(memo.updatedAt || memo.createdAt) || "日付不明"}`
+    ];
+
+    if (source.bookTitle) {
+      lines.push(`本のタイトル：${source.bookTitle}`);
+    }
+
+    if (source.author) {
+      lines.push(`著者名：${source.author}`);
+    }
+
+    if (source.page) {
+      lines.push(`ページ番号：${source.page}`);
+    }
+
+    lines.push("");
+    lines.push("【メモ本文】");
+    lines.push(memo.original || "");
+    lines.push("");
+    lines.push("────────────────────");
+
+    return lines.join("\n");
+  }).join("\n\n");
+}
+
+async function copyTextWithFallback(text) {
+  try {
+    if (navigator.clipboard && navigator.clipboard.writeText) {
+      await navigator.clipboard.writeText(text);
+      return true;
+    }
+  } catch (error) {
+    console.warn("Clipboard APIでのコピーに失敗しました。", error);
+  }
+
+  // Clipboard APIが使えない環境向けの代替処理
+  const textarea = document.createElement("textarea");
+  textarea.value = text;
+  textarea.setAttribute("readonly", "");
+  textarea.style.position = "fixed";
+  textarea.style.left = "-9999px";
+  textarea.style.top = "0";
+
+  document.body.appendChild(textarea);
+  textarea.focus();
+  textarea.select();
+  textarea.setSelectionRange(0, textarea.value.length);
+
+  let copied = false;
+
+  try {
+    copied = document.execCommand("copy");
+  } catch (error) {
+    console.error("代替コピーにも失敗しました。", error);
+  }
+
+  textarea.remove();
+
+  return copied;
+}
+
+async function copySelectedMemosToNotion() {
+  const selectedMemos = memos.filter((memo) =>
+    selectedMemoIds.has(memo.id)
+  );
+
+  if (selectedMemos.length === 0) {
+    alert("コピーするメモを選択してください。");
+    return;
+  }
+
+  const text = buildBulkNotionText(selectedMemos);
+
+  const copied = await copyTextWithFallback(text);
+
+  if (copied) {
+    alert(
+      `${selectedMemos.length}件のメモをまとめてコピーしました！\n\n` +
+      "Notionを開き、貼り付けてください。\n" +
+      "メモのタイトル・ジャンル・本文などがまとめてコピーされています。"
+    );
+  } else {
+    alert(
+      "自動コピーできませんでした。\n" +
+      "HTTPSの公開サイトから再度お試しください。"
+    );
+  }
 }
 
 // ----------------------------------------
@@ -423,6 +702,11 @@ function renderMemos() {
     return matchesKeyword && matchesCategory;
   });
 
+  currentlyDisplayedMemoIds = filteredMemos.map((memo) => memo.id);
+
+  ensureBulkCopyToolbar();
+  updateBulkToolbar();
+
   memoList.replaceChildren();
 
   if (filteredMemos.length === 0) {
@@ -440,6 +724,9 @@ function renderMemos() {
   filteredMemos.forEach((memo) => {
     const card = document.createElement("article");
     card.className = "memo-card";
+
+    // 一括コピー用のチェックボックス
+    card.appendChild(createMemoSelectionControl(memo));
 
     const header = document.createElement("div");
     header.className = "memo-card-header";
@@ -608,6 +895,7 @@ function renderMemos() {
   });
 
   updateCounts();
+  updateBulkToolbar();
 }
 
 // ----------------------------------------
@@ -696,7 +984,6 @@ async function copyMemoForChatGPT(id) {
   } catch (error) {
     console.error("ChatGPT用の文章のコピーに失敗しました。", error);
 
-    // Clipboard APIが使えない環境向けの代替処理
     const textarea = document.createElement("textarea");
     textarea.value = text;
     textarea.style.position = "fixed";
@@ -753,7 +1040,6 @@ async function copyMemoToNotion(id) {
   } catch (error) {
     console.error("コピーに失敗しました。", error);
 
-    // コピー機能が使えない環境向けの代替処理
     const textarea = document.createElement("textarea");
     textarea.value = text;
     textarea.style.position = "fixed";
@@ -933,6 +1219,8 @@ function deleteMemo(id) {
     memos = previousMemos;
     return;
   }
+
+  selectedMemoIds.delete(id);
 
   if (editingMemoId === id) {
     resetEditor();
